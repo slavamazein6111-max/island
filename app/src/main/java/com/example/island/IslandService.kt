@@ -14,6 +14,7 @@ import android.content.res.ColorStateList
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.Rect
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.hardware.camera2.CameraCharacteristics
@@ -61,6 +62,8 @@ class IslandService : Service() {
     private lateinit var lp: WindowManager.LayoutParams
     private lateinit var root: LinearLayout
     private lateinit var header: LinearLayout
+    private lateinit var topRow: LinearLayout
+    private lateinit var spacer: View
     private lateinit var timeView: TextView
     private lateinit var trackView: TextView
     private lateinit var batteryView: TextView
@@ -76,6 +79,9 @@ class IslandService : Service() {
     private var attached = false
     private var expanded = false
     private var trackText = ""
+
+    // вырез камеры (верхний), в пикселях; null — выреза нет
+    private var cutout: Rect? = null
 
     private val timeFmt = SimpleDateFormat("HH:mm", Locale.getDefault())
 
@@ -129,6 +135,8 @@ class IslandService : Service() {
         camManager = getSystemService(CAMERA_SERVICE) as CameraManager
 
         buildUi()
+        readInitialCutout()
+        applyGeometry(update = false)
         wm.addView(root, lp)
         attached = true
 
@@ -232,32 +240,59 @@ class IslandService : Service() {
         }
 
         // ---- шапка (всегда видна) ----
+        // Первая строка: [время] [пустое место под камеру] [батарея].
+        // Текст никогда не попадает под вырез. Трек — отдельной строкой НИЖЕ выреза.
         header = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(14), dp(7), dp(14), dp(7))
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), 0, dp(14), dp(7))
             setOnClickListener { setExpanded(!expanded) }
         }
         timeView = TextView(this).apply {
             setTextColor(Color.WHITE)
             textSize = 14f
             typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER_VERTICAL or Gravity.START
         }
+        batteryView = TextView(this).apply {
+            setTextColor(Color.WHITE)
+            textSize = 13f
+            gravity = Gravity.CENTER_VERTICAL or Gravity.END
+        }
+        spacer = View(this)
+        topRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        topRow.addView(timeView, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f))
+        topRow.addView(spacer, LinearLayout.LayoutParams(0, 1))
+        topRow.addView(batteryView, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f))
+        header.addView(topRow, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ))
+
         trackView = TextView(this).apply {
             setTextColor(0xFFB0B0B8.toInt())
             textSize = 13f
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
-            setPadding(dp(10), 0, dp(10), 0)
+            gravity = Gravity.CENTER
         }
-        batteryView = TextView(this).apply {
-            setTextColor(Color.WHITE)
-            textSize = 13f
-        }
-        header.addView(timeView)
-        header.addView(trackView)
-        header.addView(batteryView)
+        header.addView(trackView, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ))
         root.addView(header)
+
+        // вырез узнаём из insets окна (на случай поворота / смены экрана)
+        root.setOnApplyWindowInsetsListener { v, insets ->
+            if (Build.VERSION.SDK_INT >= 28) {
+                val r = topCutoutRect(insets.displayCutout)
+                if (r != cutout) {
+                    cutout = r
+                    if (attached) applyGeometry(update = true)
+                }
+            }
+            v.onApplyWindowInsets(insets)
+        }
 
         // ---- раскрытая панель ----
         panel = LinearLayout(this).apply {
@@ -394,20 +429,6 @@ class IslandService : Service() {
         expanded = e
         panel.visibility = if (e) View.VISIBLE else View.GONE
         root.background = bg(Color.BLACK, if (e) dp(30) else dp(20))
-
-        val screenW = resources.displayMetrics.widthPixels
-        lp.width = if (e) minOf(dp(360), screenW - dp(24)) else ViewGroup.LayoutParams.WRAP_CONTENT
-
-        header.layoutParams = LinearLayout.LayoutParams(
-            if (e) ViewGroup.LayoutParams.MATCH_PARENT else ViewGroup.LayoutParams.WRAP_CONTENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT
-        )
-        trackView.layoutParams = if (e) {
-            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-        } else {
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-        }
-        trackView.maxWidth = if (e) Int.MAX_VALUE else dp(140)
         updateTrackVisibility()
 
         if (e) {
@@ -415,11 +436,63 @@ class IslandService : Service() {
             volume.progress = audio.getStreamVolume(AudioManager.STREAM_MUSIC)
             startMedia()
         }
-        wm.updateViewLayout(root, lp)
+        applyGeometry(update = true)
 
         root.alpha = 0.4f
         root.translationY = -dp(8).toFloat()
         root.animate().alpha(1f).translationY(0f).setDuration(180).start()
+    }
+
+    // ------------------------------------------------------------------ вырез камеры
+
+    private fun topCutoutRect(dc: android.view.DisplayCutout?): Rect? {
+        if (dc == null || Build.VERSION.SDK_INT < 28) return null
+        val r = if (Build.VERSION.SDK_INT >= 29) dc.boundingRectTop
+                else dc.boundingRects.firstOrNull { it.top <= 0 }
+        return if (r == null || r.isEmpty) null else Rect(r)
+    }
+
+    private fun readInitialCutout() {
+        if (Build.VERSION.SDK_INT >= 30) {
+            try {
+                cutout = topCutoutRect(wm.currentWindowMetrics.windowInsets.displayCutout)
+            } catch (_: Exception) {}
+        }
+    }
+
+    /**
+     * Раскладка относительно выреза:
+     *  - вырез по центру  -> остров "обнимает" камеру: время слева, батарея справа;
+     *  - вырез сбоку/нет  -> остров сидит ниже выреза, без пустой середины.
+     */
+    private fun applyGeometry(update: Boolean) {
+        val screenW = resources.displayMetrics.widthPixels
+        val cut = cutout
+        val centered = cut != null &&
+            Math.abs(cut.centerX() - screenW / 2) < screenW * 0.12f
+
+        val gapPx: Int
+        val rowMin: Int
+        if (cut != null && centered) {
+            gapPx = cut.width() + dp(16)
+            rowMin = maxOf(cut.bottom + dp(6), dp(34))
+            lp.y = 0
+        } else {
+            gapPx = dp(8)
+            rowMin = dp(34)
+            lp.y = if (cut != null) cut.bottom + dp(4) else dp(6)
+        }
+
+        spacer.layoutParams = LinearLayout.LayoutParams(gapPx, 1)
+        topRow.minimumHeight = rowMin
+
+        lp.width = if (expanded) {
+            minOf(dp(360), screenW - dp(24))
+        } else {
+            // симметрично: слева и справа от зазора одинаковая ширина
+            dp(28) + gapPx + 2 * dp(56)
+        }
+        if (update && attached) wm.updateViewLayout(root, lp)
     }
 
     private fun launch(i: Intent) {
@@ -513,9 +586,9 @@ class IslandService : Service() {
     }
 
     private fun updateTrackVisibility() {
-        // свёрнутый остров показывает трек только когда что-то играет;
-        // раскрытый — всегда (чтобы батарея уходила вправо)
-        trackView.visibility = if (expanded || trackText.isNotEmpty()) View.VISIBLE else View.GONE
+        // трек — отдельная строка под выемкой; только в свёрнутом виде и пока что-то играет
+        // (в раскрытом названием занимается плеер)
+        trackView.visibility = if (!expanded && trackText.isNotEmpty()) View.VISIBLE else View.GONE
     }
 
     // ------------------------------------------------------------------ фонарик
