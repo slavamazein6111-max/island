@@ -242,9 +242,24 @@ class IslandService : Service() {
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
+    private val cTile = 0xFF17171B.toInt()
+    private val cTileOn = 0xFFFFC857.toInt()
+    private val cStroke = 0xFF2C2C32.toInt()
+    private val cMuted = 0xFF9A9AA3.toInt()
+    private val cAccent = 0xFFFF9A3C.toInt()
+
     private fun bg(color: Int, radius: Int) = GradientDrawable().apply {
         setColor(color)
         cornerRadius = radius.toFloat()
+    }
+
+    /** Плитка: тёмный фон + тонкая обводка, как в оригинальном Island. */
+    private fun tileBg(color: Int, radius: Int) = bg(color, radius).apply {
+        setStroke(dp(1), cStroke)
+    }
+
+    private fun islandBg(radius: Int) = bg(Color.BLACK, radius).apply {
+        setStroke(dp(1), cStroke)
     }
 
     private fun buildUi() {
@@ -309,7 +324,7 @@ class IslandService : Service() {
         ))
 
         trackView = TextView(this).apply {
-            setTextColor(0xFFB0B0B8.toInt())
+            setTextColor(cMuted)
             textSize = 13f
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
@@ -323,7 +338,7 @@ class IslandService : Service() {
         // ---- раскрытая панель ----
         panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(14), dp(4), dp(14), dp(14))
+            setPadding(dp(16), dp(6), dp(16), dp(16))
         }
 
         // плеер
@@ -333,23 +348,23 @@ class IslandService : Service() {
         }
         artView = ImageView(this).apply {
             scaleType = ImageView.ScaleType.CENTER_CROP
-            background = bg(0xFF2A2A2E.toInt(), dp(14))
+            background = bg(cTile, dp(18))
             clipToOutline = true
         }
-        mediaRow.addView(artView, LinearLayout.LayoutParams(dp(64), dp(64)).apply {
-            rightMargin = dp(12)
+        mediaRow.addView(artView, LinearLayout.LayoutParams(dp(84), dp(84)).apply {
+            rightMargin = dp(14)
         })
         val texts = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         titleView = TextView(this).apply {
             setTextColor(Color.WHITE)
-            textSize = 16f
+            textSize = 18f
             typeface = Typeface.DEFAULT_BOLD
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
         }
         artistView = TextView(this).apply {
-            setTextColor(0xFFB0B0B8.toInt())
-            textSize = 13f
+            setTextColor(cMuted)
+            textSize = 14f
             maxLines = 2
             ellipsize = TextUtils.TruncateAt.END
         }
@@ -373,9 +388,15 @@ class IslandService : Service() {
         val next = mediaButton(android.R.drawable.ic_media_next) {
             controller?.transportControls?.skipToNext()
         }
-        for (b in listOf(prev, playBtn, next)) {
-            controlsRow.addView(b, LinearLayout.LayoutParams(0, dp(44), 1f))
+        playBtn.apply {
+            setColorFilter(Color.BLACK)
+            background = bg(Color.WHITE, dp(26))
         }
+        controlsRow.addView(prev, LinearLayout.LayoutParams(0, dp(48), 1f))
+        controlsRow.addView(playBtn, LinearLayout.LayoutParams(dp(52), dp(52)).apply {
+            leftMargin = dp(8); rightMargin = dp(8)
+        })
+        controlsRow.addView(next, LinearLayout.LayoutParams(0, dp(48), 1f))
         panel.addView(controlsRow, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
         ).apply { topMargin = dp(6) })
@@ -384,7 +405,8 @@ class IslandService : Service() {
         val audio = getSystemService(AUDIO_SERVICE) as AudioManager
         volume = SeekBar(this).apply {
             max = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-            progressTintList = ColorStateList.valueOf(Color.WHITE)
+            progressTintList = ColorStateList.valueOf(cAccent)
+            progressBackgroundTintList = ColorStateList.valueOf(cStroke)
             thumbTintList = ColorStateList.valueOf(Color.WHITE)
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(s: SeekBar, p: Int, fromUser: Boolean) {
@@ -399,21 +421,21 @@ class IslandService : Service() {
         ).apply { topMargin = dp(8) })
 
         // быстрые действия
-        torchChip = chip("Фонарик") { toggleTorch() }
+        torchChip = chip("🔦", "Фонарик") { toggleTorch() }
         val row1 = chipRow(
             torchChip,
-            chip("Интернет") {
+            chip("📶", "Интернет") {
                 launch(
                     if (Build.VERSION.SDK_INT >= 29) Intent(Settings.Panel.ACTION_INTERNET_CONNECTIVITY)
                     else Intent(Settings.ACTION_WIFI_SETTINGS)
                 )
             },
-            chip("Bluetooth") { launch(Intent(Settings.ACTION_BLUETOOTH_SETTINGS)) }
+            chip("🎧", "Bluetooth") { launch(Intent(Settings.ACTION_BLUETOOTH_SETTINGS)) }
         )
         val row2 = chipRow(
-            chip("Камера") { launch(Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA)) },
-            chip("Звонилка") { launch(Intent(Intent.ACTION_DIAL)) },
-            chip("Настройки") { launch(Intent(Settings.ACTION_SETTINGS)) }
+            chip("📷", "Камера") { launch(Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA)) },
+            chip("📞", "Звонилка") { launch(Intent(Intent.ACTION_DIAL)) },
+            chip("⚙️", "Настройки") { launch(Intent(Settings.ACTION_SETTINGS)) }
         )
         panel.addView(row1, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
@@ -432,12 +454,12 @@ class IslandService : Service() {
         setOnClickListener { onClick() }
     }
 
-    private fun chip(label: String, onClick: () -> Unit) = TextView(this).apply {
-        text = label
+    private fun chip(icon: String, label: String, onClick: () -> Unit) = TextView(this).apply {
+        text = "$icon\n$label"
         setTextColor(Color.WHITE)
-        textSize = 13f
+        textSize = 12f
         gravity = Gravity.CENTER
-        background = bg(0xFF2A2A2E.toInt(), dp(14))
+        background = tileBg(cTile, dp(18))
         setPadding(dp(4), dp(12), dp(4), dp(12))
         setOnClickListener { onClick() }
     }
@@ -454,7 +476,7 @@ class IslandService : Service() {
     private fun setExpanded(e: Boolean) {
         expanded = e
         panel.visibility = if (e) View.VISIBLE else View.GONE
-        root.background = bg(Color.BLACK, if (e) dp(30) else dp(20))
+        root.background = islandBg(if (e) dp(32) else dp(20))
         updateTrackVisibility()
 
         if (e) {
@@ -672,7 +694,7 @@ class IslandService : Service() {
     }
 
     private fun updateTorchChip() {
-        torchChip.background = bg(if (torchOn) Color.WHITE else 0xFF2A2A2E.toInt(), dp(14))
+        torchChip.background = if (torchOn) bg(cTileOn, dp(18)) else tileBg(cTile, dp(18))
         torchChip.setTextColor(if (torchOn) Color.BLACK else Color.WHITE)
     }
 }
