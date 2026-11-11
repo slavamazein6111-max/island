@@ -14,7 +14,6 @@ import android.content.res.ColorStateList
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.PixelFormat
-import android.graphics.Rect
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.hardware.camera2.CameraCharacteristics
@@ -80,9 +79,6 @@ class IslandService : Service() {
     private var expanded = false
     private var trackText = ""
 
-    // вырез камеры (верхний), в пикселях; null — выреза нет
-    private var cutout: Rect? = null
-
     private val timeFmt = SimpleDateFormat("HH:mm", Locale.getDefault())
 
     // ---- медиа ----
@@ -135,7 +131,6 @@ class IslandService : Service() {
         camManager = getSystemService(CAMERA_SERVICE) as CameraManager
 
         buildUi()
-        readInitialCutout()
         applyGeometry(update = false)
         wm.addView(root, lp)
         attached = true
@@ -281,18 +276,6 @@ class IslandService : Service() {
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
         ))
         root.addView(header)
-
-        // вырез узнаём из insets окна (на случай поворота / смены экрана)
-        root.setOnApplyWindowInsetsListener { v, insets ->
-            if (Build.VERSION.SDK_INT >= 28) {
-                val r = topCutoutRect(insets.displayCutout)
-                if (r != cutout) {
-                    cutout = r
-                    if (attached) applyGeometry(update = true)
-                }
-            }
-            v.onApplyWindowInsets(insets)
-        }
 
         // ---- раскрытая панель ----
         panel = LinearLayout(this).apply {
@@ -443,55 +426,24 @@ class IslandService : Service() {
         root.animate().alpha(1f).translationY(0f).setDuration(180).start()
     }
 
-    // ------------------------------------------------------------------ вырез камеры
+    // ------------------------------------------------------------------ геометрия
 
-    private fun topCutoutRect(dc: android.view.DisplayCutout?): Rect? {
-        if (dc == null || Build.VERSION.SDK_INT < 28) return null
-        val r = if (Build.VERSION.SDK_INT >= 29) dc.boundingRectTop
-                else dc.boundingRects.firstOrNull { it.top <= 0 }
-        return if (r == null || r.isEmpty) null else Rect(r)
-    }
-
-    private fun readInitialCutout() {
-        if (Build.VERSION.SDK_INT >= 30) {
-            try {
-                cutout = topCutoutRect(wm.currentWindowMetrics.windowInsets.displayCutout)
-            } catch (_: Exception) {}
-        }
+    private fun statusBarHeight(): Int {
+        val id = resources.getIdentifier("status_bar_height", "dimen", "android")
+        return if (id > 0) resources.getDimensionPixelSize(id) else dp(24)
     }
 
     /**
-     * Раскладка относительно выреза:
-     *  - вырез по центру  -> остров "обнимает" камеру: время слева, батарея справа;
-     *  - вырез сбоку/нет  -> остров сидит ниже выреза, без пустой середины.
+     * Остров ВСЕГДА стоит ниже строки статуса (и ниже выреза камеры).
+     * Выше — на прошивках вроде MIUI/HyperOS статус-бар рисуется поверх оверлея:
+     * текст налезает на иконки, а нажатия перехватывает статус-бар.
      */
     private fun applyGeometry(update: Boolean) {
         val screenW = resources.displayMetrics.widthPixels
-        val cut = cutout
-        val centered = cut != null &&
-            Math.abs(cut.centerX() - screenW / 2) < screenW * 0.12f
-
-        val gapPx: Int
-        val rowMin: Int
-        if (cut != null && centered) {
-            gapPx = cut.width() + dp(16)
-            rowMin = maxOf(cut.bottom + dp(6), dp(34))
-            lp.y = 0
-        } else {
-            gapPx = dp(8)
-            rowMin = dp(34)
-            lp.y = if (cut != null) cut.bottom + dp(4) else dp(6)
-        }
-
-        spacer.layoutParams = LinearLayout.LayoutParams(gapPx, 1)
-        topRow.minimumHeight = rowMin
-
-        lp.width = if (expanded) {
-            minOf(dp(360), screenW - dp(24))
-        } else {
-            // симметрично: слева и справа от зазора одинаковая ширина
-            dp(28) + gapPx + 2 * dp(56)
-        }
+        lp.y = statusBarHeight() + dp(4)
+        spacer.layoutParams = LinearLayout.LayoutParams(dp(24), 1)
+        topRow.minimumHeight = dp(34)
+        lp.width = if (expanded) minOf(dp(360), screenW - dp(24)) else dp(28) + dp(24) + 2 * dp(56)
         if (update && attached) wm.updateViewLayout(root, lp)
     }
 
