@@ -1,5 +1,8 @@
 package com.example.island
 
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
+import android.animation.ValueAnimator
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -25,7 +28,9 @@ import android.media.session.MediaSessionManager
 import android.media.session.PlaybackState
 import android.os.BatteryManager
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.provider.MediaStore
 import android.provider.Settings
 import android.text.TextUtils
@@ -34,6 +39,8 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
+import android.view.animation.AccelerateInterpolator
+import android.view.animation.OvershootInterpolator
 import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -54,6 +61,7 @@ class IslandService : Service() {
         @Volatile
         var running = false
         const val ACTION_REFRESH = "com.example.island.REFRESH"
+        const val ACTION_SHOW = "com.example.island.SHOW"
         private const val CHANNEL = "island_service"
     }
 
@@ -76,6 +84,17 @@ class IslandService : Service() {
     private lateinit var torchChip: TextView
 
     private var attached = false
+
+    // ---- появление / прятанье ----
+    private val handler = Handler(Looper.getMainLooper())
+    private var islandVisible = false   // остров сейчас показан (или выезжает)
+    private var prog = 0f               // 0 = спрятан в камере, 1 = стоит на месте
+    private var anim: ValueAnimator? = null
+    private var lastTrackKey = ""
+    private val hideRunnable = Runnable { if (!expanded) hideIsland() }
+    private val eventReceiver = object : BroadcastReceiver() {
+        override fun onReceive(c: Context, i: Intent) = showIsland()
+    }
     private var expanded = false
     private var trackText = ""
 
@@ -143,23 +162,34 @@ class IslandService : Service() {
             addAction(Intent.ACTION_TIME_CHANGED)
             addAction(Intent.ACTION_TIMEZONE_CHANGED)
         })
+        reg(eventReceiver, IntentFilter().apply {
+            addAction(Intent.ACTION_USER_PRESENT)
+            addAction(Intent.ACTION_POWER_CONNECTED)
+            addAction(Intent.ACTION_POWER_DISCONNECTED)
+        })
         initTorch()
         startMedia()
         setExpanded(false)
+        root.visibility = View.GONE   // сначала спрятан в камере
+        showIsland()                  // и красиво выезжает при запуске
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_REFRESH && attached) startMedia()
+        if (intent?.action == ACTION_SHOW && attached) showIsland()
         return START_STICKY
     }
 
     override fun onDestroy() {
         running = false
+        handler.removeCallbacksAndMessages(null)
+        anim?.cancel()
         if (attached) {
             try { wm.removeView(root) } catch (_: Exception) {}
             attached = false
             try { unregisterReceiver(tickReceiver) } catch (_: Exception) {}
             try { unregisterReceiver(batteryReceiver) } catch (_: Exception) {}
+            try { unregisterReceiver(eventReceiver) } catch (_: Exception) {}
             try { camManager.unregisterTorchCallback(torchCallback) } catch (_: Exception) {}
             controller?.unregisterCallback(controllerCallback)
             if (sessionsListenerRegistered) {
@@ -184,6 +214,17 @@ class IslandService : Service() {
             .setContentTitle("Island работает")
             .setContentText("Нажми, чтобы открыть настройки")
             .setContentIntent(pi)
+            .addAction(
+                Notification.Action.Builder(
+                    android.graphics.drawable.Icon.createWithResource(this, R.drawable.ic_launcher),
+                    "Показать остров",
+                    PendingIntent.getService(
+                        this, 1,
+                        Intent(this, IslandService::class.java).setAction(ACTION_SHOW),
+                        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                    )
+                ).build()
+            )
             .setOngoing(true)
             .build()
         if (Build.VERSION.SDK_INT >= 34) {
@@ -214,7 +255,9 @@ class IslandService : Service() {
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
                 WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH or
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
@@ -421,9 +464,63 @@ class IslandService : Service() {
         }
         applyGeometry(update = true)
 
-        root.alpha = 0.4f
-        root.translationY = -dp(8).toFloat()
-        root.animate().alpha(1f).translationY(0f).setDuration(180).start()
+        handler.removeCallbacks(hideRunnable)
+        if (!e && islandVisible) handler.postDelayed(hideRunnable, 1500)
+    }
+
+    // ------------------------------------------------------------------ появление из камеры
+
+    /** Выезжает из «кружка камеры» и опускается на своё место. Через 4 с уезжает обратно. */
+    private fun showIsland() {
+        if (!attached) return
+        handler.removeCallbacks(hideRunnable)
+        if (!islandVisible || prog < 1f) {
+            islandVisible = true
+            root.visibility = View.VISIBLE
+            lp.flags = lp.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+            animateIsland(show = true, end = null)
+        }
+        if (!expanded) handler.postDelayed(hideRunnable, 4000)
+    }
+
+    private fun hideIsland() {
+        if (!attached || !islandVisible) return
+        animateIsland(show = false) {
+            root.visibility = View.GONE
+            lp.flags = lp.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+            islandVisible = false
+            try { wm.updateViewLayout(root, lp) } catch (_: Exception) {}
+        }
+    }
+
+    private fun animateIsland(show: Boolean, end: (() -> Unit)?) {
+        anim?.cancel()
+        var canceled = false
+        anim = ValueAnimator.ofFloat(prog, if (show) 1f else 0f).apply {
+            duration = if (show) 520L else 320L
+            interpolator = if (show) OvershootInterpolator(0.9f) else AccelerateInterpolator()
+            addUpdateListener { applyProgress(it.animatedValue as Float) }
+            addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationCancel(a: Animator) { canceled = true }
+                override fun onAnimationEnd(a: Animator) { if (!canceled) end?.invoke() }
+            })
+            start()
+        }
+    }
+
+    private fun applyProgress(p: Float) {
+        prog = p
+        val shownY = statusBarHeight() + dp(4)
+        val h = if (root.height > 0) root.height else dp(41)
+        val hiddenY = statusBarHeight() / 2 - h / 2   // центр острова = центр строки статуса (камера)
+        lp.y = (hiddenY + (shownY - hiddenY) * p).toInt()
+        val sc = 0.12f + 0.88f * p.coerceIn(0f, 1.1f)
+        root.pivotX = root.width / 2f
+        root.pivotY = root.height / 2f
+        root.scaleX = sc
+        root.scaleY = sc
+        root.alpha = (p * 2.5f).coerceIn(0f, 1f)
+        try { wm.updateViewLayout(root, lp) } catch (_: Exception) {}
     }
 
     // ------------------------------------------------------------------ геометрия
@@ -440,7 +537,7 @@ class IslandService : Service() {
      */
     private fun applyGeometry(update: Boolean) {
         val screenW = resources.displayMetrics.widthPixels
-        lp.y = statusBarHeight() + dp(4)
+        if (anim?.isRunning != true) lp.y = statusBarHeight() + dp(4)
         spacer.layoutParams = LinearLayout.LayoutParams(dp(24), 1)
         topRow.minimumHeight = dp(34)
         lp.width = if (expanded) minOf(dp(360), screenW - dp(24)) else dp(28) + dp(24) + 2 * dp(56)
@@ -510,6 +607,7 @@ class IslandService : Service() {
             controlsRow.visibility = View.GONE
             artView.visibility = View.GONE
             trackText = ""
+            lastTrackKey = ""
         } else {
             val md = c.metadata
             val title = md?.getString(MediaMetadata.METADATA_KEY_TITLE)
@@ -532,6 +630,9 @@ class IslandService : Service() {
                 artView.visibility = View.GONE
             }
             trackText = if (playing && title != null) "♪ $title" else ""
+            val key = if (playing && title != null) "$title|$artist" else ""
+            if (key.isNotEmpty() && key != lastTrackKey) showIsland()
+            lastTrackKey = key
         }
         trackView.text = trackText
         updateTrackVisibility()
